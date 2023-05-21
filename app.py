@@ -144,7 +144,7 @@ NASDAQ Microsoft Corp Follow Share $288.37 After Hours: $287.86 (0.18%) -0.51 Cl
         return chat_history[self.user]
 
 
-class Chategram:
+class Chattergpt:
     def __init__(self, context: ChatContext):
         self.context = context
 
@@ -243,24 +243,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message
     chat_context = ChatContext(update, context)
-    Chategram(chat_context).reset_history()
+    Chattergpt(chat_context).reset_history()
     await update.message.reply_text("Ok")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.info("message_handler received text")
     assert update.message and update.message.text and update.effective_user
-    chategram = Chategram(ChatContext(update, context))
+    chattergpt = Chattergpt(ChatContext(update, context))
 
     allowed_userids = os.environ["ALLOWED_TELEGRAM_USER_IDS"].split(",")
-    if not update.effective_user.id in allowed_userids:
+    if not str(update.effective_user.id) in allowed_userids:
         logging.warning(
-            f"User {update.effective_user.id} {update.effective_user.username} - not whitelisted"
+            f"User {update.effective_user.id} {update.effective_user.username} - not whitelisted ({allowed_userids})"
         )
-        await chategram.context.reply_text("Sorry, you are not whitelisted.")
+        await chattergpt.context.reply_text("Sorry, you are not whitelisted.")
         return
 
-    await chategram.on_user_message(update.message.text)
+    await chattergpt.on_user_message(update.message.text)
 
 
 def main() -> None:
