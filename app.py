@@ -166,7 +166,8 @@ class Chattergpt:
             if not v.created == Created.INITIAL
         ]
         self._chat_history.add_history(
-            Role.USER, "Please summarize our conversation so far."
+            Role.USER,
+            "Please summarize our conversation so far. Answer with summary only.",
         )
         # FIXME : there is an empty assistant content in here.. dont know why.
         prompt_str = "".join(str(v) for v in history)
@@ -184,7 +185,7 @@ class Chattergpt:
 
     async def on_user_message(self, message: str, automated_reply_count: int = 0):
         token_count = self.count_tokens()
-        if token_count > 1000:
+        if token_count > 2500:
             logging.warning(f"Token count high {token_count} Summarizing...")
             await self.summarize()
         token_count = self.count_tokens()
@@ -225,8 +226,13 @@ class Chattergpt:
                 await self.context.telegram_action_typing()
                 reply = await tool.process_commands(self.context, match.group(1))
                 if reply:
-                    await self.context.reply_text(reply.reply)
-                    await self.on_user_message(reply.reply, automated_reply_count + 1)
+                    short_reply = reply.reply
+                    if len(short_reply) > 4000:
+                        short_reply = short_reply.replace("</result>", "")
+                        short_reply = short_reply[:3950] + "...</result>"
+                    # todo : could calculate whats left of context length here and limit based on that...
+                    await self.context.reply_text(short_reply)
+                    await self.on_user_message(short_reply, automated_reply_count + 1)
                     break
 
 
