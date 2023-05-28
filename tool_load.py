@@ -1,9 +1,5 @@
-import json
 import logging
-import os
-from typing import Dict, List
 
-import requests
 from trafilatura import extract, fetch_url
 from trafilatura.settings import use_config
 

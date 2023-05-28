@@ -90,7 +90,7 @@ class ChatHistory:
             ChatHistoryItem(
                 Role.USER,
                 """Answer as short and concise, but maintaining relevant information.
-Assume the user is from European, and wants answers in Celcus/EUR etc.
+You are a researcher.
 From now on, whenever your response depends on any factual information, or if the user asks you to confirm something, please search the web by using the function <search>query</search> before responding. I will then paste web results in, and you can respond.
 If you can't find the results in the search result you can use <load>https://www.valid.url/with/parameters</load> to have me load a webpage for you with more details.""",
                 created=Created.INITIAL,
@@ -175,9 +175,9 @@ class Chattergpt:
 {{#assistant~}}
 {{gen "answer"}}
 {{~/assistant}}"""
-        prompt = guidance(prompt_str, async_mode=True, stream=True, silent=True)  # type: ignore
+        prompt = guidance(prompt_str)  # type: ignore
         answer = await self.context.stream_chatgpt_reply(
-            prompt(async_mode=True, stream=True, silent=True)
+            prompt(stream=True, silent=True)
         )
         self._chat_history.reset()
         assert answer
@@ -203,9 +203,9 @@ class Chattergpt:
 {{~/assistant}}"""
 
         logging.info(f"Token count estimate : {token_count}")
-        prompt = guidance(prompt_str, async_mode=True, stream=True, silent=True)  # type: ignore
+        prompt = guidance(prompt_str)  # type: ignore
         answer = await self.context.stream_chatgpt_reply(
-            prompt(async_mode=True, stream=True, silent=True)
+            prompt(stream=True, silent=True)
         )
         assert answer
         self._chat_history.add_history(Role.ASSISTANT, answer)

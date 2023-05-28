@@ -31,19 +31,12 @@ class ChatContext:
     async def stream_chatgpt_reply(self, reply: guidance.Program):
         await self.telegram_action_typing()
         telegram_message = await self.reply_text("...")
-
-        async def update_reply(last=False):
-            last_str = "..." if not last else ""
-            response = reply["answer"].strip() + last_str if "answer" in reply else ""
+        response = ""
+        for running_reply in reply:
+            response = running_reply.get("answer", "").strip()
             if response:
-                await telegram_message.edit_text(reply["answer"].strip())
-
-        while not reply.update_display._done:  # done() does await...
-            await update_reply()
-            await asyncio.sleep(0.1)
-        await update_reply(last=True)
-
-        return reply["answer"].strip()
+                await telegram_message.edit_text(response)
+        return response
 
 
 @dataclass
