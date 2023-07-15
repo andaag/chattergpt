@@ -7,9 +7,9 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-openai = "^0.27.7"
+openai = "^0.27.8"
 python-telegram-bot = "^20.3"
-guidance = "^0.0.57"
+guidance = "0.0.64"
 python-dotenv = "^1.0.0"
 trafilatura = "^1.6.0"
 
@@ -17,3 +17,9 @@ trafilatura = "^1.6.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pyright]
+typeCheckingMode = "basic"
+
+[tool.black]
+line-length = 120

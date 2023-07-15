@@ -1,4 +1,17 @@
-.env*
+.env
+.env.prod
 __pycache__
 log.txt
 build.sh
+
+# Devenv
+.devenv*
+devenv.local.nix
+chattergpt
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+

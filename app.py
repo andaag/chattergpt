@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
@@ -20,19 +19,16 @@ from telegram.ext import (
 )
 
 from shared import ChatContext
-from tool_load import LoadTool
-from tool_search import SearchTool
+from tool_load import load_webpage
+from tool_search import search
 
 load_dotenv()
 
 # Enable logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-guidance.llm = guidance.llms.OpenAI("gpt-4")
-encoding = tiktoken.encoding_for_model("gpt-4")
-
+guidance.llm = guidance.llms.OpenAI("gpt-4-0613", caching=False)
+encoding = tiktoken.encoding_for_model("gpt-4-0613")
 
 # State:
 chat_history: Dict[str, List["ChatHistoryItem"]] = {}
@@ -85,59 +81,20 @@ class ChatHistory:
     def reset(self):
         chat_history[self.user] = [
             ChatHistoryItem(
-                Role.SYSTEM, "You are a helpful assistant.", created=Created.INITIAL
+                Role.SYSTEM,
+                "You are a helpful assistant.\n{{>tool_def functions=functions}}",
+                created=Created.INITIAL,
             ),
             ChatHistoryItem(
                 Role.USER,
                 """Answer as short and concise, but maintaining relevant information.
-You are a researcher.
-From now on, whenever your response depends on any factual information, or if the user asks you to confirm something, please search the web by using the function <search>query</search> before responding. I will then paste web results in, and you can respond.
-If you can't find the results in the search result you can use <load>https://www.valid.url/with/parameters</load> to have me load a webpage for you with more details.""",
+You are a my assistant with an IQ of 120.
+From now on, whenever your response depends on any factual information, or if the I ask you to confirm something please search for more updated information on the internet.
+
+Ok?""",
                 created=Created.INITIAL,
             ),
             ChatHistoryItem(Role.ASSISTANT, "Ok", created=Created.INITIAL),
-            ChatHistoryItem(
-                Role.USER,
-                """Lets practice. What is Microsoft's stock price right now?""",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.ASSISTANT,
-                "<search>Microsoft stock price</search>",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.USER,
-                """<result>
-Microsoft Corp (MSFT) Stock Price & News - Google Finance Home MSFT • NASDAQ Microsoft Corp Follow Share
-
-https://finance.yahoo.com/quote/MSFT/
-</result>
-<result>
-Microsoft Corporation (MSFT) Stock Price, News, Quote & History - Yahoo Finance U.S. markets closed -4.31 Russell 2000 -7.29(-0.40%) (+0.05%) -2.80 HAPPENING SOON: Yahoo Finance breaks...
-
-https://www.marketwatch.com/investing/stock/msft
-</result>""",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.ASSISTANT,
-                """<load>https://finance.yahoo.com/quote/MSFT/</load>""",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.USER,
-                """<result>
-NASDAQ Microsoft Corp Follow Share $288.37 After Hours: $287.86 (0.18%) -0.51 Closed: Apr 18, 5:57:32 PM GMT-4 ·...
-</result>
-""",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.ASSISTANT,
-                """Microsoft's stock price is currently $288.37. Please note that stock prices are constantly changing, so it's best to check an updated source for the most accurate information.""",
-                created=Created.INITIAL,
-            ),
         ]
 
     def get_history(self) -> List[ChatHistoryItem]:
@@ -147,9 +104,41 @@ NASDAQ Microsoft Corp Follow Share $288.37 After Hours: $287.86 (0.18%) -0.51 Cl
 class Chattergpt:
     def __init__(self, context: ChatContext):
         self.context = context
+        self.functions = [
+            {
+                "name": "search",
+                "description": "Search the internet for up to date information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search string",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "load_webpage",
+                "description": "Load a web page",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "A valid url to load. Always use a search first to find the correct url unless you are told which url to use",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
+        ]
 
         self._chat_history = ChatHistory(context)
-        self.tools = [SearchTool(), LoadTool()]
+
+    def create_program(self, prompt: str) -> guidance.Program:
+        return guidance(prompt)  # type: ignore
 
     def reset_history(self):
         self._chat_history.reset()
@@ -160,11 +149,7 @@ class Chattergpt:
     async def summarize(self):
         await self.context.reply_text("Summarizing our conversation so far...")
         await self.context.telegram_action_typing()
-        history = [
-            v
-            for v in self._chat_history.get_history()
-            if not v.created == Created.INITIAL
-        ]
+        history = [v for v in self._chat_history.get_history() if not v.created == Created.INITIAL]
         self._chat_history.add_history(
             Role.USER,
             "Please summarize our conversation so far. Answer with summary only.",
@@ -175,68 +160,48 @@ class Chattergpt:
 {{#assistant~}}
 {{gen "answer"}}
 {{~/assistant}}"""
-        prompt = guidance(prompt_str)  # type: ignore
-        answer = await self.context.stream_chatgpt_reply(
-            prompt(stream=True, silent=True)
-        )
+        program = self.create_program(prompt_str)
+        answer = await self.context.stream_chatgpt_reply(program(stream=True, silent=True))  # type: ignore
         self._chat_history.reset()
         assert answer
         self._chat_history.add_history(Role.ASSISTANT, answer)
 
-    async def on_user_message(self, message: str, automated_reply_count: int = 0):
+    async def on_user_message(self, message: str):
         token_count = self.count_tokens()
         if token_count > 2500:
             logging.warning(f"Token count high {token_count} Summarizing...")
             await self.summarize()
         token_count = self.count_tokens()
 
-        logging.info(
-            f"on_user_message : Answering (automated reply count {automated_reply_count})"
-        )
         self._chat_history.add_history(Role.USER, message)
 
         history = self._chat_history.get_history()
         prompt_str = "".join(str(v) for v in history)
         prompt_str += """
-{{#assistant~}}
-{{gen "answer"}}
-{{~/assistant}}"""
-
+{{~#each range(10)~}}
+    {{#assistant~}}
+        {{gen "answer" function_call="auto" }}
+    {{~/assistant}}
+    {{#if not callable(answer)}}{{break}}{{/if}}
+    {{~#function name=answer.__name__~}}
+    {{answer()}}
+    {{~/function~}}
+{{~/each~}}
+"""
+        # print("Query:\n", prompt_str, "\n")
         logging.info(f"Token count estimate : {token_count}")
-        prompt = guidance(prompt_str)  # type: ignore
+
+        program = self.create_program(prompt_str)
+        logger.info("Computing answer...")
         answer = await self.context.stream_chatgpt_reply(
-            prompt(stream=True, silent=True)
+            program(stream=True, silent=True, functions=self.functions, search=search, load_webpage=load_webpage)  # type: ignore
         )
+        logger.info("Answer recieved")
         assert answer
         self._chat_history.add_history(Role.ASSISTANT, answer)
-        await self.on_answer(answer, automated_reply_count)
-
-    async def on_answer(self, answer: str, automated_reply_count: int = 0):
-        logging.info(f"on_answer {automated_reply_count}")
-        if automated_reply_count > 5:
-            logging.warning("Too many automated replies, stopping")
-            await self.context.reply_text(
-                "Too many automated replies, stopping - Please let me know how this happened to improve!"
-            )
-            return
-        for tool in self.tools:
-            match = re.search(tool.tool_regex_match(), answer)
-            if match:
-                logging.info(f"on_answer - found tool {tool.__class__.__name__}")
-                await self.context.telegram_action_typing()
-                reply = await tool.process_commands(self.context, match.group(1))
-                if reply:
-                    short_reply = reply.reply
-                    if len(short_reply) > 4000:
-                        short_reply = short_reply.replace("</result>", "")
-                        short_reply = short_reply[:3950] + "...</result>"
-                    # todo : could calculate whats left of context length here and limit based on that...
-                    await self.context.reply_text(short_reply)
-                    await self.on_user_message(short_reply, automated_reply_count + 1)
-                    break
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     assert update.message and update.effective_user
     user = update.effective_user

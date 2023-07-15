@@ -1,15 +1,23 @@
 import json
-import logging
 import os
-from typing import Dict
 
 import requests
 
-from shared import ChatContext, Tool, ToolResult
+from shared import debug
 
 
-def search(query):
+def search(query: str):
+    """Searches the internet for a query.
+
+    Parameters
+    ----------
+    query : string
+        The query to search for.
+    """
+
     def _search(query):
+        if debug():
+            print(f"Search called {query}")
         url = "https://google.serper.dev/search"
 
         payload = json.dumps({"q": query})
@@ -31,31 +39,6 @@ def search(query):
     #            + results["answerBox"]["answer"]
     #        }
     #    ] + snippets
-    return snippets[0:3]
-
-
-class SearchTool(Tool):
-    def tool_regex_match(self) -> str:
-        return r"<search>(.*?)<\/search>"
-
-    async def process_commands(
-        self, context: ChatContext, search_query: str
-    ) -> ToolResult | None:
-        await context.telegram_action_typing()
-
-        logging.info(f"Search : Searching for {search_query}")
-
-        results_list = search(search_query)
-        results = "No results found"
-
-        if results_list:
-
-            def entry_to_str(item: Dict[str, str]):
-                yield "\n<result>\n"
-                yield item["snippet"].strip()
-                if "link" in item:
-                    yield "\n" + item["link"].strip()
-                yield "\n<result>\n"
-
-            results = "".join(["".join(entry_to_str(item)) for item in results_list])
-        return ToolResult(results)
+    return json.dumps(snippets[0:5])
+    #    ] + snippets
+    return json.dumps(snippets[0:5])
