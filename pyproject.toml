@@ -12,6 +12,7 @@ python-telegram-bot = "^20.3"
 guidance = "0.0.64"
 python-dotenv = "^1.0.0"
 trafilatura = "^1.6.0"
+cryptography = "^41.0.2"
 
 
 [build-system]

@@ -9,7 +9,7 @@ from typing import List
 
 import guidance
 from telegram import Message, Update, constants
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -38,6 +38,9 @@ def retry(func):
                 await asyncio.sleep(backoff)
                 backoff += 1
                 continue
+            except BadRequest as e:
+                logger.warning(f"Ignoring badrequest {e}")
+                return
         assert last_exception
         raise last_exception
 
