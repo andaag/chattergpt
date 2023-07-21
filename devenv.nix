@@ -4,6 +4,16 @@
   dotenv.enable = true;
   pre-commit.hooks.black.enable = true;
   pre-commit.hooks.shellcheck.enable = true;
+  pre-commit.hooks.secret-scan = {
+    enable = true;
+    name = "Secret scanner";
+    entry = "grep -qv 'private_key'";
+    files = ".*";
+    language = "system";
+    pass_filenames = true;
+  };
+
+
   languages.python.enable = true;
   languages.python.package = pkgs.python311;
   languages.python.poetry.enable = true;
