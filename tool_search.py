@@ -2,8 +2,13 @@ import json
 import os
 
 import requests
+from pydantic import BaseModel, Field
 
 from shared import debug
+
+
+class SearchQuery(BaseModel):
+    query: str = Field(description="The query to search for")
 
 
 def search(query: str):
@@ -38,7 +43,5 @@ def search(query: str):
     #            + "="
     #            + results["answerBox"]["answer"]
     #        }
-    #    ] + snippets
-    return json.dumps(snippets[0:5])
     #    ] + snippets
     return json.dumps(snippets[0:5])

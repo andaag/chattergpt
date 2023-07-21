@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
-from typing import List
+from typing import Any, Dict, Generator, List
 
-import guidance
 from telegram import Message, Update, constants
 from telegram.error import BadRequest, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
@@ -39,6 +39,10 @@ def retry(func):
                 backoff += 1
                 continue
             except BadRequest as e:
+                if "Too Many Requests" in str(e):
+                    await asyncio.sleep(backoff)
+                    backoff += 1
+                    continue
                 logger.warning(f"Ignoring badrequest {e}")
                 return
         assert last_exception
@@ -65,7 +69,7 @@ class ChatContext:
         assert self.update and self.update.message
         return await self.update.message.reply_text(message)
 
-    async def stream_chatgpt_reply(self, reply: guidance.Program):
+    async def stream_chatgpt_reply(self, response: Generator[Dict[Any, str], None, None]):
         await self.telegram_action_typing()
         logger.info("Callback stream_chatgpt_reply")
 
@@ -76,27 +80,51 @@ class ChatContext:
 
         @retry
         async def edit_message(telegram_message: Message, text: str):
-            logger.info("Callback edit_message...")
-            await telegram_message.edit_text(text)
+            if text:
+                await telegram_message.edit_text(text)
 
         telegram_message = await create_inital_message()
         logger.info(f"Telegram message created {telegram_message}")
 
-        last_response = ""
-        response = ""
-        for running_reply in reply:
-            response = running_reply.get("answer", "").strip()
-            if response and response != last_response:
-                await edit_message(telegram_message, response)
-                last_response = response
-                await asyncio.sleep(0.1)  # minimum delay.
-        return response
+        content = ""
+        function_call = ""
+        function_arguments = ""
+        finish_reason = ""
+        last_response = None
+        last_edit = time.time()
+
+        def rendered_content():
+            s = content
+            if not s and function_call:
+                s += f"```\n{function_call}({function_arguments})\n```"
+            if s == last_response:
+                return ""
+            return s
+
+        for chunk in response:
+            choice = chunk["choices"][0]
+            content += choice["delta"].get("content", "") or ""  # type: ignore
+            function_call += choice["delta"].get("function_call", {}).get("name", "") or ""  # type: ignore
+            function_arguments += choice["delta"].get("function_call", {}).get("arguments") or ""  # type: ignore
+            finish_reason += choice["finish_reason"] or ""  # type: ignore
+
+            if not finish_reason and time.time() - last_edit > 0.5:
+                await edit_message(telegram_message, rendered_content())
+                last_edit = time.time()
+            last_response = rendered_content()
+
+        try:
+            await telegram_message.edit_text(rendered_content(), parse_mode=constants.ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.warning(f"Failed to edit message {e}")
+            await edit_message(telegram_message, rendered_content())
+
+        return finish_reason, content, function_call, function_arguments
 
 
 @dataclass
 class ToolResult:
     reply: str
-    # hidden:bool = False
 
 
 class Tool(ABC):

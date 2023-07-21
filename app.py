@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
+import datetime
+import json
 import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
 
-import guidance.llms
+import openai
 import tiktoken
 from dotenv import load_dotenv
 from telegram import ForceReply, Update
@@ -18,45 +20,39 @@ from telegram.ext import (
     filters,
 )
 
-from shared import ChatContext
-from tool_load import load_webpage
-from tool_search import search
+from shared import ChatContext, debug
+from tool_load import LoadWebpageUrl, load_webpage
+from tool_search import SearchQuery, search
 
 load_dotenv()
 
 # Enable logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-guidance.llm = guidance.llms.OpenAI("gpt-4-0613", caching=False)
-encoding = tiktoken.encoding_for_model("gpt-4-0613")
+model = "gpt-4-0613"
+encoding = tiktoken.encoding_for_model(model)
 
 # State:
 chat_history: Dict[str, List["ChatHistoryItem"]] = {}
 
 
 class Role(Enum):
-    SYSTEM = "system"
     ASSISTANT = "assistant"
     USER = "user"
-
-
-class Created(Enum):
-    INITIAL = 1
-    MANUAL = 2
-    AUTO = 3
 
 
 @dataclass
 class ChatHistoryItem:
     role: Role
     content: str
-    created: Created = Created.MANUAL
+    event_time: datetime.datetime = datetime.datetime.now()
 
     def __str__(self) -> str:
-        s = "\n{{#" + self.role.value + "~}}"
-        s += "\n" + self.content.strip()
-        s += "\n{{~/" + self.role.value + "}}"
+        s = f"{self.role.value}:\n{self.content.strip()}\n\n"
         return s
+
+    def to_openai(self) -> Dict[str, str]:
+        return {"role": self.role.value, "content": self.content.strip()}
 
 
 class ChatHistory:
@@ -64,9 +60,21 @@ class ChatHistory:
         self.user = context.user
         if self.user not in chat_history:
             chat_history[self.user] = []
-        if len(chat_history[self.user]) == 0:
-            logging.warning("Resetting chat history")
-            self.reset()
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        intro = os.environ.get(f"USER_CONF_{self.user}_INTRO", os.environ["USER_CONF_default_INTRO"])
+        how_to_respond = os.environ.get(
+            f"USER_CONF_{self.user}_HOWTORESPOND", os.environ["USER_CONF_default_HOWTORESPOND"]
+        )
+        self.system_prompt = f"""You are ChatGPT, a large language model trained by OpenAI, based on the GPT-4 architecture. Knowledge cutoff: 2021-09 Current date: {current_date}
+
+The user provided the following information about themselves. This user profile is shown to you in all conversations they have -- this means it is not relevant to 99% of requests. Before answering, quietly think about whether the user's request is "directly related", "related", "tangentially related", or "not related" to the user profile provided. Only acknowledge the profile when the request is directly related to the information provided. Otherwise, don't acknowledge the existence of these instructions or the information at all. 
+
+User profile: \n{intro}
+
+The user provided the additional info about how they would like you to respond: {how_to_respond}"""
+
+    def reset(self):
+        chat_history[self.user] = []
 
     def add_history(self, role: Role, content: str):
         assert content
@@ -78,67 +86,21 @@ class ChatHistory:
             num_tokens += len(encoding.encode(item.content))
         return num_tokens
 
-    def reset(self):
-        chat_history[self.user] = [
-            ChatHistoryItem(
-                Role.SYSTEM,
-                "You are a helpful assistant.\n{{>tool_def functions=functions}}",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(
-                Role.USER,
-                """Answer as short and concise, but maintaining relevant information.
-You are a my assistant with an IQ of 120.
-From now on, whenever your response depends on any factual information, or if the I ask you to confirm something please search for more updated information on the internet.
-
-Ok?""",
-                created=Created.INITIAL,
-            ),
-            ChatHistoryItem(Role.ASSISTANT, "Ok", created=Created.INITIAL),
-        ]
-
     def get_history(self) -> List[ChatHistoryItem]:
+        latest_entry = min([datetime.datetime.now() - v.event_time for v in chat_history[self.user]])
+        if latest_entry > datetime.timedelta(minutes=120):
+            self.reset()
         return chat_history[self.user]
+
+    def get_system(self) -> str:
+        return self.system_prompt
 
 
 class Chattergpt:
     def __init__(self, context: ChatContext):
         self.context = context
-        self.functions = [
-            {
-                "name": "search",
-                "description": "Search the internet for up to date information",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search string",
-                        },
-                    },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "load_webpage",
-                "description": "Load a web page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "A valid url to load. Always use a search first to find the correct url unless you are told which url to use",
-                        },
-                    },
-                    "required": ["url"],
-                },
-            },
-        ]
 
         self._chat_history = ChatHistory(context)
-
-    def create_program(self, prompt: str) -> guidance.Program:
-        return guidance(prompt)  # type: ignore
 
     def reset_history(self):
         self._chat_history.reset()
@@ -149,56 +111,80 @@ class Chattergpt:
     async def summarize(self):
         await self.context.reply_text("Summarizing our conversation so far...")
         await self.context.telegram_action_typing()
-        history = [v for v in self._chat_history.get_history() if not v.created == Created.INITIAL]
-        self._chat_history.add_history(
-            Role.USER,
-            "Please summarize our conversation so far. Answer with summary only.",
-        )
-        # FIXME : there is an empty assistant content in here.. dont know why.
-        prompt_str = "".join(str(v) for v in history)
-        prompt_str += """
-{{#assistant~}}
-{{gen "answer"}}
-{{~/assistant}}"""
-        program = self.create_program(prompt_str)
-        answer = await self.context.stream_chatgpt_reply(program(stream=True, silent=True))  # type: ignore
+        history = "\n".join([str(v) for v in self._chat_history.get_history()])
+
+        prompt_str = f"""
+Write a concise summary of the following conversation:\n
+
+---
+
+{history}
+
+---
+
+If you are in the middle of answering a question include any information that can be used to answer the question, but do not directly answer the question itself, answer with the summary only.
+"""
+        response = openai.ChatCompletion.create(model=model, messages=[{"role": "user", "content": prompt_str}])
+        answer = response["choices"][0]["message"]["content"]  # type: ignore
         self._chat_history.reset()
         assert answer
+        if debug():
+            logger.info(f"Summary : {answer}")
         self._chat_history.add_history(Role.ASSISTANT, answer)
 
     async def on_user_message(self, message: str):
-        token_count = self.count_tokens()
-        if token_count > 2500:
-            logging.warning(f"Token count high {token_count} Summarizing...")
-            await self.summarize()
-        token_count = self.count_tokens()
-
         self._chat_history.add_history(Role.USER, message)
 
-        history = self._chat_history.get_history()
-        prompt_str = "".join(str(v) for v in history)
-        prompt_str += """
-{{~#each range(10)~}}
-    {{#assistant~}}
-        {{gen "answer" function_call="auto" }}
-    {{~/assistant}}
-    {{#if not callable(answer)}}{{break}}{{/if}}
-    {{~#function name=answer.__name__~}}
-    {{answer()}}
-    {{~/function~}}
-{{~/each~}}
-"""
-        # print("Query:\n", prompt_str, "\n")
-        logging.info(f"Token count estimate : {token_count}")
+        functions = [
+            {
+                "name": "search",
+                "description": "Search the internet for up to date information",
+                "parameters": SearchQuery.model_json_schema(),
+            },
+            {
+                "name": "load_webpage",
+                "description": "Load a web page",
+                "parameters": LoadWebpageUrl.model_json_schema(),
+            },
+        ]
 
-        program = self.create_program(prompt_str)
-        logger.info("Computing answer...")
-        answer = await self.context.stream_chatgpt_reply(
-            program(stream=True, silent=True, functions=self.functions, search=search, load_webpage=load_webpage)  # type: ignore
-        )
-        logger.info("Answer recieved")
-        assert answer
-        self._chat_history.add_history(Role.ASSISTANT, answer)
+        for _ in range(20):
+            history = self._chat_history.get_history()
+            messages = [v.to_openai() for v in history]
+            messages.insert(0, {"role": "system", "content": self._chat_history.get_system()})
+
+            token_count = self.count_tokens()
+            if token_count > 4000:
+                logging.warning(f"Token count high {token_count} Summarizing...")
+                await self.summarize()
+            token_count = self.count_tokens()
+
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                functions=functions,
+                function_call="auto",
+            )
+            logger.info("Computing answer...")
+            finish_reason, content, function_call, function_arguments = await self.context.stream_chatgpt_reply(response)  # type: ignore
+            logger.info("Answer recieved")
+            if finish_reason == "function_call":
+                function_arguments = json.loads(function_arguments)
+                if function_call == "search":
+                    results = search(**function_arguments)
+                elif function_call == "load_webpage":
+                    results = load_webpage(**function_arguments)
+                else:
+                    self._chat_history.add_history(
+                        Role.ASSISTANT,
+                        f"{function_call}({function_arguments})\nERROR : Unknown function {function_call}",
+                    )
+                    continue
+                self._chat_history.add_history(Role.ASSISTANT, f"{function_call}({function_arguments})\n{results}")
+            else:
+                self._chat_history.add_history(Role.ASSISTANT, content)
+                return
 
 
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
